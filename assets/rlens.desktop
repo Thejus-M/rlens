@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=rlens
+GenericName=Screen Lens
+Comment=Select a screen area to copy text, decode QR codes, translate, or search with Google Lens
+Exec=rlens
+Icon=edit-find
+Terminal=false
+Categories=Utility;Graphics;
+Keywords=lens;ocr;qr;barcode;translate;screenshot;search;
+StartupWMClass=rlens

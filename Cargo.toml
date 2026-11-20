@@ -1,0 +1,32 @@
+[package]
+name = "rlens"
+version = "0.1.0"
+edition = "2024"
+description = "Google Lens for the Linux desktop: OCR, in-place translation, QR codes and Google Lens search"
+license = "MIT"
+repository = "https://github.com/Thejus-M/rlens"
+readme = "README.md"
+
+[dependencies]
+anyhow = "1.0.104"
+arboard = { version = "3.7.0", features = ["wayland-data-control"] }
+ashpd = { version = "0.14.1", default-features = false, features = ["async-io", "screenshot"] }
+base64 = "0.23.1"
+clap = { version = "4.6.9", features = ["derive"] }
+directories = "6.0.0"
+eframe = { version = "0.37.0", default-features = false, features = ["default_fonts", "glow", "wayland", "x11"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif"] }
+notify-rust = "4.19.0"
+pollster = "1.0.3"
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "multipart", "default-tls", "json", "query", "form"] }
+rxing = { version = "0.9.4", default-features = false, features = ["decoders", "encoding_rs", "full_barcode_format_support", "multi_barcode_readers"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+tempfile = "3.27.0"
+tokio = { version = "1.54.1", features = ["rt", "macros"] }
+toml = "1.2.1"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+url = "2.5.8"
+which = "8.0.6"
+xcap = "0.9.10"
