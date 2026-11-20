@@ -53,15 +53,59 @@ pub fn recognize(img: &RgbaImage, langs: &str) -> Result<OcrResult> {
     if let Ok(path) = std::env::var("RLENS_OCR_DUMP") {
         let _ = clean.save(&path);
     }
-    let (a, b) = std::thread::scope(|s| {
-        let a = s.spawn(|| run_tesseract(&plain, &langs));
-        let b = s.spawn(|| run_tesseract(&clean, &langs));
-        (a.join(), b.join())
+    // The first language leads Tesseract's recognition: with `eng` first,
+    // Japanese or Tamil text comes out as Latin garbage. So besides the
+    // configured order, each other language also gets a pass where it leads.
+    let mut jobs: Vec<(&DynamicImage, String)> =
+        vec![(&plain, langs.clone()), (&clean, langs.clone())];
+    let parts: Vec<&str> = langs.split('+').collect();
+    if parts.len() > 1 {
+        // Only the leading language plus English: a third language in the
+        // mix (for example Spanish next to Japanese) degrades it again.
+        for l in parts.iter().filter(|l| **l != "eng") {
+            let pair = if parts.contains(&"eng") {
+                format!("{l}+eng")
+            } else {
+                l.to_string()
+            };
+            jobs.push((&plain, pair.clone()));
+            jobs.push((&clean, pair));
+        }
+    }
+    let results: Vec<Result<Vec<Word>>> = std::thread::scope(|s| {
+        let handles: Vec<_> = jobs
+            .iter()
+            .map(|(img, l)| s.spawn(move || run_tesseract(img, l)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| {
+                h.join()
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("OCR thread panicked")))
+            })
+            .collect()
     });
-    let a = a.map_err(|_| anyhow::anyhow!("OCR thread panicked"))??;
-    let b = b.map_err(|_| anyhow::anyhow!("OCR thread panicked"))??;
-    tracing::debug!("ocr score: plain {} clean {}", score(&a), score(&b));
-    let mut words = if score(&b) > score(&a) { b } else { a };
+    let mut best: Option<(f32, Vec<Word>)> = None;
+    let mut first_err = None;
+    for ((_, l), r) in jobs.iter().zip(results) {
+        match r {
+            Ok(w) => {
+                let sc = score(&w);
+                tracing::debug!("ocr pass {l}: score {sc:.1}");
+                if best.as_ref().is_none_or(|(b, _)| sc > *b) {
+                    best = Some((sc, w));
+                }
+            }
+            Err(e) => {
+                first_err.get_or_insert(e);
+            }
+        }
+    }
+    let mut words = match (best, first_err) {
+        (Some((_, w)), _) => w,
+        (None, Some(e)) => return Err(e),
+        (None, None) => Vec::new(),
+    };
 
     for w in &mut words {
         for v in &mut w.rect {
