@@ -37,6 +37,139 @@ fn http() -> Result<reqwest::blocking::Client> {
         .build()?)
 }
 
+/// Translate several texts with one request where the engine allows it.
+/// When the online engine fails (for example Google rate-limits the
+/// network with HTTP 429) and a local Ollama model is available, fall back
+/// to it. The second value is a note for the user when a fallback was used.
+pub fn translate_batch(
+    texts: &[String],
+    target: &str,
+    cfg: &crate::config::Config,
+) -> Result<(Vec<String>, Option<String>)> {
+    let t = &cfg.translate;
+    let primary = match t.engine.as_str() {
+        "google" => google_batch(texts, target),
+        "ollama" => ollama_batch(texts, target, cfg),
+        _ => texts.iter().map(|x| translate(x, target, cfg)).collect(),
+    };
+    let err = match primary {
+        Ok(v) => return Ok((v, None)),
+        Err(e) => e,
+    };
+    let limited = format!("{err:#}").contains("429");
+    if t.engine != "ollama" && ollama_has_model(&cfg.ollama.url, &t.ollama_model) {
+        tracing::warn!(
+            "translate: {err:#}; falling back to Ollama {}",
+            t.ollama_model
+        );
+        let v = ollama_batch(texts, target, cfg)?;
+        let why = if limited {
+            "Google is rate-limiting this network"
+        } else {
+            "online translation failed"
+        };
+        return Ok((
+            v,
+            Some(format!("{why}; translated locally with {}", t.ollama_model)),
+        ));
+    }
+    if limited {
+        bail!(
+            "Google Translate is rate-limiting this network (HTTP 429). Try again in a few minutes, or set [translate] engine = \"ollama\" in the config."
+        );
+    }
+    Err(err)
+}
+
+/// All texts in one Google request, one per line; the reply keeps the line
+/// breaks. Falls back to one request per text when the lines do not match.
+fn google_batch(texts: &[String], target: &str) -> Result<Vec<String>> {
+    let clean: Vec<String> = texts.iter().map(|t| t.replace(['\n', '\r'], " ")).collect();
+    let joined = translate_google(&clean.join("\n"), target)?;
+    let lines: Vec<String> = joined.split('\n').map(|l| l.trim().to_string()).collect();
+    if lines.len() == clean.len() {
+        return Ok(lines);
+    }
+    tracing::debug!(
+        "google batch: {} lines for {} texts; per text",
+        lines.len(),
+        clean.len()
+    );
+    let mut out = Vec::new();
+    for t in &clean {
+        out.push(translate_google(t, target)?);
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    Ok(out)
+}
+
+fn ollama_batch(
+    texts: &[String],
+    target: &str,
+    cfg: &crate::config::Config,
+) -> Result<Vec<String>> {
+    let (url, model) = (&cfg.ollama.url, &cfg.translate.ollama_model);
+    if texts.len() == 1 {
+        return Ok(vec![translate_ollama(&texts[0], target, url, model)?]);
+    }
+    // One prompt with numbered lines; parse the numbers back.
+    let mut prompt = format!(
+        "Translate each numbered line into the language with code `{target}`. \
+         Reply with the same numbers, one line each, translation only.\n"
+    );
+    for (i, t) in texts.iter().enumerate() {
+        prompt.push_str(&format!("{}. {}\n", i + 1, t.replace(['\n', '\r'], " ")));
+    }
+    let mut out = String::new();
+    ollama_generate(url, model, &prompt, None, |c| out.push_str(c))?;
+    match parse_numbered(&out, texts.len()) {
+        Some(v) => Ok(v),
+        None => texts
+            .iter()
+            .map(|t| translate_ollama(t, target, url, model))
+            .collect(),
+    }
+}
+
+/// Parse "1. text" lines into `n` strings, in order.
+fn parse_numbered(reply: &str, n: usize) -> Option<Vec<String>> {
+    let mut out = vec![None; n];
+    for line in reply.lines() {
+        let line = line.trim();
+        let Some((num, rest)) = line.split_once(['.', ')', ':']) else {
+            continue;
+        };
+        if let Ok(k) = num.trim().parse::<usize>()
+            && (1..=n).contains(&k)
+        {
+            out[k - 1] = Some(rest.trim().to_string());
+        }
+    }
+    out.into_iter().collect()
+}
+
+/// True when Ollama answers at `url` and has `model` pulled.
+fn ollama_has_model(url: &str, model: &str) -> bool {
+    let Ok(client) = reqwest::blocking::Client::builder()
+        .timeout(Duration::from_millis(1500))
+        .build()
+    else {
+        return false;
+    };
+    let Ok(resp) = client
+        .get(format!("{}/api/tags", url.trim_end_matches('/')))
+        .send()
+    else {
+        return false;
+    };
+    let Ok(v) = resp.json::<serde_json::Value>() else {
+        return false;
+    };
+    v["models"]
+        .as_array()
+        .is_some_and(|m| m.iter().any(|x| x["name"].as_str() == Some(model)))
+}
+
 fn translate_google(text: &str, target: &str) -> Result<String> {
     let resp: serde_json::Value = http()?
         .post("https://translate.googleapis.com/translate_a/single")
@@ -119,7 +252,9 @@ fn ollama_generate(
     image_b64: Option<String>,
     mut on_chunk: impl FnMut(&str),
 ) -> Result<()> {
-    let mut body = serde_json::json!({ "model": model, "prompt": prompt, "stream": true });
+    // `think: false`: reasoning models (gemma4, qwen3) answer 10× faster.
+    let mut body =
+        serde_json::json!({ "model": model, "prompt": prompt, "stream": true, "think": false });
     if let Some(b64) = image_b64 {
         body["images"] = serde_json::json!([b64]);
     }
@@ -205,5 +340,15 @@ mod tests {
         .unwrap();
         println!("ollama: {out}");
         assert!(!out.trim().is_empty());
+    }
+
+    #[test]
+    fn numbered_reply() {
+        let r = "1. Humans can live!\n2) - Bill, April 2015\n";
+        assert_eq!(
+            parse_numbered(r, 2).unwrap(),
+            vec!["Humans can live!", "- Bill, April 2015"]
+        );
+        assert!(parse_numbered("1. only one", 2).is_none());
     }
 }

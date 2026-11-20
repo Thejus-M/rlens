@@ -44,8 +44,11 @@ Runtime dependencies:
 | Fedora | `sudo dnf install tesseract tesseract-langpack-eng wl-clipboard xclip grim xdg-desktop-portal chromium` |
 
 Any Chromium-family browser (Brave, Chrome, Edge, Vivaldi) works for the Lens panel.
-Add OCR languages with the matching Tesseract language pack, then set
-`[ocr] langs = "eng+hin"`.
+
+**Other scripts:** install the Tesseract language pack for each script you want to read, for example
+`sudo pacman -S tesseract-data-tam tesseract-data-hin tesseract-data-mal` (Debian/Ubuntu:
+`tesseract-ocr-tam` …). With the default `[ocr] langs = "auto"`, rlens uses English plus up to
+three installed packs. You can also set the list yourself, for example `langs = "eng+tam"`.
 
 Build and install (Rust 1.88 or newer):
 
@@ -112,6 +115,13 @@ select_all = true          # start with the whole screen selected
 
 - **Text** is read by Tesseract. Words are grouped into lines and paragraphs. A paragraph is split
   where the layout or the background changes, and noise such as icons and symbol strings is skipped.
+- **Hard backgrounds** (video frames, glowing text, busy pictures): every OCR runs twice at the
+  same time, on the image as it is and on a clean black-on-white version (Otsu threshold; dark
+  images are inverted). The pass with more confident text wins. Lines are also split at wide
+  gaps, so stray words on pictures do not join real sentences.
+- **Translation** is one batched request for all paragraphs. When Google rate-limits the network
+  (HTTP 429) and a local Ollama model is available (`[translate] ollama_model`), rlens falls back
+  to it and says so.
 - **Translation** runs per paragraph, so whole sentences keep their context. The result is then spread
   back over the original lines in proportion to their widths. The original glyphs are erased with a
   small inpainting step: a colour-distance mask, row-wise interpolation and a light blur. The

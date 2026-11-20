@@ -31,7 +31,8 @@ impl Default for UiConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct OcrConfig {
-    /// Tesseract language codes joined by `+`, for example `eng+hin`.
+    /// Tesseract language codes joined by `+`, for example `eng+hin`, or
+    /// `auto`: English plus up to three other installed language packs.
     pub langs: String,
 }
 
@@ -72,7 +73,7 @@ pub struct LensConfig {
 impl Default for OcrConfig {
     fn default() -> Self {
         Self {
-            langs: "eng".into(),
+            langs: "auto".into(),
         }
     }
 }
@@ -163,6 +164,6 @@ mod tests {
         let cfg: Config = toml::from_str("[translate]\ntarget = \"hi\"\n").unwrap();
         assert_eq!(cfg.translate.target, "hi");
         assert_eq!(cfg.translate.engine, "google");
-        assert_eq!(cfg.ocr.langs, "eng");
+        assert_eq!(cfg.ocr.langs, "auto");
     }
 }

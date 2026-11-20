@@ -56,6 +56,8 @@ enum Msg {
     Codes(u64, Vec<barcode::Code>),
     /// (request key, paragraph index or None for one whole-text request, result)
     Translated(u64, Option<usize>, Result<String, String>),
+    /// A message for the user (shown as a toast).
+    Note(String),
     AiChunk(String),
     AiDone(Result<(), String>),
 }
@@ -361,10 +363,14 @@ impl LensApp {
                                 .collect::<Vec<_>>()
                                 .join("\n\n");
                         }
-                        (_, Err(e)) => self.toast(ctx, format!("Translate: {e}")),
+                        (_, Err(e)) => {
+                            tracing::warn!("translate: {e}");
+                            self.toast(ctx, format!("Translate: {e}"))
+                        }
                     }
                 }
                 Msg::Translated(..) => {}
+                Msg::Note(n) => self.toast(ctx, n),
                 Msg::AiChunk(s) => self.ai_out.push_str(&s),
                 Msg::AiDone(r) => {
                     self.ai_busy = false;
@@ -542,21 +548,58 @@ impl LensApp {
                 .collect()
         };
         if jobs.is_empty() {
+            tracing::info!(
+                "translate: all {} paragraphs look like noise: {:?}",
+                self.paras.len(),
+                self.paras
+                    .iter()
+                    .map(|p| (p.para.conf as i32, p.para.text.clone()))
+                    .collect::<Vec<_>>()
+            );
             self.translate_busy = false;
             self.show_translation = false;
-            self.toast(ctx, "No text to translate");
+            let hint = if crate::ocr::installed_langs()
+                .iter()
+                .all(|l| l == "eng" || l == "osd")
+            {
+                "No text found. For other scripts, install a Tesseract language pack (e.g. tesseract-data-tam)."
+            } else {
+                "No text to translate"
+            };
+            self.toast(ctx, hint);
             return;
         }
+        tracing::info!(
+            "translate: {} of {} paragraphs to {}",
+            jobs.len(),
+            self.paras.len(),
+            self.target
+        );
         self.translate_pending = jobs.len();
-        for (idx, text) in jobs {
-            let (target, cfg) = (self.target.clone(), self.cfg.clone());
-            let (tx, c) = (self.tx.clone(), ctx.clone());
-            std::thread::spawn(move || {
-                let r = net::translate(&text, &target, &cfg).map_err(|e| format!("{e:#}"));
-                let _ = tx.send(Msg::Translated(key, idx, r));
-                c.request_repaint();
-            });
-        }
+        // One batched request for all paragraphs: many parallel requests
+        // make Google rate-limit the network.
+        let (target, cfg) = (self.target.clone(), self.cfg.clone());
+        let (tx, c) = (self.tx.clone(), ctx.clone());
+        std::thread::spawn(move || {
+            let texts: Vec<String> = jobs.iter().map(|(_, t)| t.clone()).collect();
+            match net::translate_batch(&texts, &target, &cfg) {
+                Ok((out, note)) => {
+                    if let Some(n) = note {
+                        let _ = tx.send(Msg::Note(n));
+                    }
+                    for ((idx, _), t) in jobs.into_iter().zip(out) {
+                        let _ = tx.send(Msg::Translated(key, idx, Ok(t)));
+                    }
+                }
+                Err(e) => {
+                    let e = format!("{e:#}");
+                    for (idx, _) in jobs {
+                        let _ = tx.send(Msg::Translated(key, idx, Err(e.clone())));
+                    }
+                }
+            }
+            c.request_repaint();
+        });
     }
 
     /// Lay out each translated paragraph over its original lines: the
@@ -820,7 +863,7 @@ impl LensApp {
             let age = now - t;
             if age < 3.5 {
                 let a = (1.0 - ((age - 3.0) / 0.5).clamp(0.0, 1.0)) as f32;
-                pill(&painter, screen.center_bottom() - vec2(0.0, 56.0), msg, a);
+                pill(&painter, screen.center_top() + vec2(0.0, 104.0), msg, a);
             }
         }
     }
