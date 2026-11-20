@@ -94,7 +94,31 @@ fn main() -> ExitCode {
     }
 }
 
+/// Take the single-instance lock. `None` means another rlens is running.
+/// The lock is released when the returned file is dropped (process exit).
+fn single_instance() -> Result<Option<std::fs::File>> {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(dir.join("rlens.lock"))
+        .context("open lock file")?;
+    match file.try_lock() {
+        Ok(()) => Ok(Some(file)),
+        Err(std::fs::TryLockError::WouldBlock) => Ok(None),
+        Err(std::fs::TryLockError::Error(e)) => Err(e).context("lock file"),
+    }
+}
+
 fn run(cli: Cli) -> Result<()> {
+    // Only one rlens at a time: a second key press while one is open does nothing.
+    let Some(_lock) = single_instance()? else {
+        tracing::info!("rlens is already running");
+        return Ok(());
+    };
     let cfg = config::Config::load();
 
     let frame = if let Some(path) = &cli.file {
